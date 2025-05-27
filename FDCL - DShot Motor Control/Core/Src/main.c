@@ -24,6 +24,7 @@
 #include "stm32f4xx_hal.h"
 #include "stm32f4xx_hal_tim.h"
 #include "stm32f4xx_hal_dma.h"
+#include <time.h>
 #include <stdio.h>
 
 /*
@@ -37,8 +38,8 @@
 #define DSHOT_BUFFER_SIZE (DSHOT_FRAME_SIZE + 2) // total DMA entries (16 bits + 2 trailing zeros)
 
 #define DSHOT_BIT_US 1.67 // µs per DShot600 bit (600,000 bits/sec)
-#define DSHOT_TIMER_FREQ 16000000 // STM32 timer frequency in Hz (16 MHz)
-#define DSHOT_BIT_TICKS 26 //((int)(DSHOT_TIMER_FREQ * DSHOT_BIT_US / 1e6)) // 1.67 µs × 16 MHz = 26.72 ≈ 27 ticks
+#define DSHOT_TIMER_FREQ 100000000
+#define DSHOT_BIT_TICKS 167  // 1.67 µs @ 100 MHz
 
 #define DSHOT_HIGH (DSHOT_BIT_TICKS * 3 / 4) // high duration for bit '1' = 75% of 27 = 20 ticks
 #define DSHOT_LOW  (DSHOT_BIT_TICKS * 3 / 8) // high duration for bit '0' = 37.5% of 27 = 10 ticks
@@ -82,8 +83,6 @@ static void MX_TIM2_Init(void);
 void send_dshot600(uint16_t value, uint8_t telemetry);
 void prepare_dshot_packet(uint16_t throttle, uint8_t telemetry);
 void dshot_beep(uint16_t command);
-void esc_spin_test();
-
 /* USER CODE END 0 */
 
 /**
@@ -115,9 +114,11 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_TIM2_Init();
-
   /* USER CODE BEGIN 2 */
-  send_dshot600(0,1);
+  for (int i = 0; i < 6; i++) {
+      send_dshot600(0, 0);
+      HAL_Delay(1);
+  }
   HAL_Delay(500);
   /* USER CODE END 2 */
 
@@ -126,7 +127,7 @@ int main(void)
   while (1)
   {
 	  //HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-	  send_dshot600(5, 1);
+	  send_dshot600(5, 0);
 	  HAL_Delay(500);
 
   }
@@ -157,7 +158,12 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 8;
+  RCC_OscInitStruct.PLL.PLLN = 100;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -167,12 +173,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
   {
     Error_Handler();
   }
@@ -199,7 +205,7 @@ static void MX_TIM2_Init(void)
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 26;
+  htim2.Init.Period = 167;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
@@ -214,7 +220,7 @@ static void MX_TIM2_Init(void)
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
   sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_LOW;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
   {
@@ -310,7 +316,7 @@ void prepare_dshot_packet(uint16_t throttle, uint8_t telemetry)
 void send_dshot600(uint16_t value, uint8_t telemetry)
 {
     prepare_dshot_packet(value, telemetry);
-    HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_3);  // Stop previous DMA transfer -- Already calling inside PulseFinishedCallback()
+    //HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_3);  // Stop previous DMA transfer -- Already calling inside PulseFinishedCallback()
     //HAL_StatusTypeDef result =
     HAL_TIM_PWM_Start_DMA(
         &htim2,
@@ -318,6 +324,11 @@ void send_dshot600(uint16_t value, uint8_t telemetry)
         (uint32_t *)dshot_dma_buffer,
         DSHOT_BUFFER_SIZE
     );
+}
+
+void TIM2_IRQHandler(void)
+{
+    HAL_TIM_IRQHandler(&htim2);
 }
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
