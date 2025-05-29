@@ -33,10 +33,11 @@
 #define DSHOT_MODE_US DSHOT600_US  // just swap this one line to change mode
 
 #define DSHOT_FRAME_SIZE 16
-#define DSHOT_BUFFER_SIZE (DSHOT_FRAME_SIZE + 2)  // 16 bits + 2 trailing zeros
+#define DSHOT_BUFFER_SIZE (DSHOT_FRAME_SIZE + 1)  // 16 bits + 2 trailing zeros
 #define DSHOT_TIMER_FREQ 100000000                // 100 MHz = 10 ns per tick
 
 #define DSHOT_BIT_TICKS ((uint16_t)(DSHOT_MODE_US * (DSHOT_TIMER_FREQ / 1e6)))
+/* ----- HIGH AND LOW DEFINITIONS FOR LOW CH POLARITY ----- */
 #define DSHOT_HIGH ((DSHOT_BIT_TICKS * 37) / 100)  // bit = 1 = short pulse (duty low)
 #define DSHOT_LOW  ((DSHOT_BIT_TICKS * 75) / 100)  // bit = 0 = long pulse (duty high)
 
@@ -74,6 +75,7 @@ uint16_t dshot_dma_buffer_b[DSHOT_BUFFER_SIZE];
 
 volatile uint16_t* active_buffer;
 volatile uint8_t buffer_toggle = 0;
+volatile uint8_t dma_busy = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -117,7 +119,6 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -126,23 +127,22 @@ int main(void)
   MX_TIM2_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-
-  //HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
   printf("\nDShot Bit Ticks: %d\r\n", DSHOT_BIT_TICKS);
   printf("DShot High: %d\r\n", DSHOT_HIGH);
   printf("DShot Low: %d\r\n", DSHOT_LOW);
-  HAL_Delay(2500);
+  printf("DShot Buffer Size: %d\r\n", DSHOT_BUFFER_SIZE);
+  HAL_Delay(1000);
 
-  /*
+  ///*
   //Send init beeps
   for (int i = 0; i < 6; i++){
-	  send_dshot(1, 0);
+	  send_dshot(5, 0);
 	  if (i%2) send_dshot(24, 0);
 	  else send_dshot(28,0);
 	  HAL_Delay(2000);
 	  printf("Beep!\r\n");
   }
-  */
+  //*/
 
   printf("Initialization Complete.\r\n------------------------------\r\n");
   /* USER CODE END 2 */
@@ -151,20 +151,27 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  ///*
+	  printf("Arming...\r\n");
+	  for (int i = 0; i < 500; i++){
+		  send_dshot(0,0);
+		  HAL_Delay(2);
+	  }
+	  //*/
 
-	  //printf("Arming...\r\n");
-	  //for (int i = 0; i < 5000; i++){
-		  //send_dshot(0,1);
-		  //HAL_Delay(1);
-	  //}
+	  ///*
 	  printf("Sending throttle pulses.\r\n");
 	  for (int i = 0; i < 5000; i++){
-		  send_dshot(1050, 0);
-		  HAL_Delay(1);
+		  send_dshot(1500, 0);
+		  HAL_Delay(2);
 	  }
+	  //*/
 
-	  //printf("Resetting...\r\n");
-	  //HAL_Delay(2000);
+	  ///*
+	  printf("Resetting...\r\n");
+	  HAL_Delay(2000);
+	  //*/
+
   }
     /* USER CODE END WHILE */
 
@@ -240,7 +247,7 @@ static void MX_TIM2_Init(void)
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 167;
+  htim2.Init.Period = 166;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
@@ -377,12 +384,16 @@ void prepare_dshot_packet(uint16_t value, uint8_t telemetry, uint16_t* buffer)
         buffer[i] = (packet & (1 << (15 - i))) ? DSHOT_HIGH : DSHOT_LOW;
     }
     buffer[16] = 0;
-    buffer[17] = 0;
+    //buffer[17] = 0;
 }
 
 void send_dshot(uint16_t value, uint8_t telemetry)
 {
+	while (dma_busy);
+	dma_busy = 1;
+
     uint16_t* buffer_to_use = buffer_toggle ? dshot_dma_buffer_b : dshot_dma_buffer_a;
+
     prepare_dshot_packet(value, telemetry, buffer_to_use);
 
     HAL_TIM_PWM_Start_DMA(&htim2, TIM_CHANNEL_3, (uint32_t*)buffer_to_use, DSHOT_BUFFER_SIZE);
@@ -412,6 +423,7 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
     if (htim->Instance == TIM2) {
         HAL_TIM_PWM_Stop_DMA(htim, TIM_CHANNEL_3);
         buffer_toggle ^= 1;  // Flip to other buffer
+        dma_busy = 0;        // Clear busy flag
     }
 }
 
