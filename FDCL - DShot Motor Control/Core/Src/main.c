@@ -127,13 +127,13 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
-
   //HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
   printf("\nDShot Bit Ticks: %d\r\n", DSHOT_BIT_TICKS);
   printf("DShot High: %d\r\n", DSHOT_HIGH);
   printf("DShot Low: %d\r\n", DSHOT_LOW);
   HAL_Delay(2500);
 
+  /*
   //Send init beeps
   for (int i = 0; i < 6; i++){
 	  send_dshot(1, 0);
@@ -142,6 +142,7 @@ int main(void)
 	  HAL_Delay(2000);
 	  printf("Beep!\r\n");
   }
+  */
 
   printf("Initialization Complete.\r\n------------------------------\r\n");
   /* USER CODE END 2 */
@@ -150,27 +151,20 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  /*
-	  printf("Arming...\r\n");
-	  for (int i = 0; i < 5000; i++){
-		  send_dshot(0,1);
-		  HAL_Delay(1);
-	  }
+
+	  //printf("Arming...\r\n");
+	  //for (int i = 0; i < 5000; i++){
+		  //send_dshot(0,1);
+		  //HAL_Delay(1);
+	  //}
 	  printf("Sending throttle pulses.\r\n");
 	  for (int i = 0; i < 5000; i++){
-		  send_dshot(1050, 1);
+		  send_dshot(1050, 0);
 		  HAL_Delay(1);
 	  }
 
-	  printf("Resetting...\r\n");
-	  HAL_Delay(2000);
-	  */
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
-	  HAL_Delay(1);
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
-	  HAL_Delay(1);
-
-
+	  //printf("Resetting...\r\n");
+	  //HAL_Delay(2000);
   }
     /* USER CODE END WHILE */
 
@@ -351,14 +345,19 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /*Configure GPIO pin : PB10 (TIM2_CH3) */
+  /* |---------- USE FOR TESTING GPIO ------------ INTERFERS WITH DMA WHEN ENABLED --------------- |
   GPIO_InitStruct.Pin = GPIO_PIN_10;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;     // Push-Pull Output
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  GPIO_InitStruct.Alternate = GPIO_AF1_TIM2;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
+  */
+  GPIO_InitStruct.Pin = GPIO_PIN_10;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;                 // Alternate Function Push-Pull
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF1_TIM2;              // Connects pin to TIM2_CH3
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
