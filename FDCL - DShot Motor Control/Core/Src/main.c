@@ -24,25 +24,26 @@
 #include "stm32f4xx_hal.h"
 #include "stm32f4xx_hal_tim.h"
 #include "stm32f4xx_hal_dma.h"
-#include <time.h>
 #include <stdio.h>
 
-/*
+#define DSHOT600_US 1.67
+#define DSHOT300_US 3.33
+#define DSHOT150_US 6.67
+
+#define DSHOT_MODE_US DSHOT600_US  // just swap this one line to change mode
+
 #define DSHOT_FRAME_SIZE 16
-#define DSHOT_BUFFER_SIZE (DSHOT_FRAME_SIZE + 2) // +2 for reset pulse
-#define DSHOT_PERIOD 26.72
-#define TIMER_MAX (DSHOT_PERIOD + 1)  // ARR = 26 → 27 counts total = ~1.688 µs
-*/
+#define DSHOT_BUFFER_SIZE (DSHOT_FRAME_SIZE + 2)  // 16 bits + 2 trailing zeros
+#define DSHOT_TIMER_FREQ 100000000                // 100 MHz = 10 ns per tick
 
-#define DSHOT_FRAME_SIZE 16 // bits in a DShot packet (11 throttle + 1 telemetry + 4 checksum)
-#define DSHOT_BUFFER_SIZE (DSHOT_FRAME_SIZE + 2) // total DMA entries (16 bits + 2 trailing zeros)
+#define DSHOT_BIT_TICKS ((uint16_t)(DSHOT_MODE_US * (DSHOT_TIMER_FREQ / 1e6)))
+#define DSHOT_HIGH ((DSHOT_BIT_TICKS * 37) / 100)  // bit = 1 = short pulse (duty low)
+#define DSHOT_LOW  ((DSHOT_BIT_TICKS * 75) / 100)  // bit = 0 = long pulse (duty high)
 
-#define DSHOT_BIT_US 1.67 // µs per DShot600 bit (600,000 bits/sec)
-#define DSHOT_TIMER_FREQ 100000000
-#define DSHOT_BIT_TICKS 167  // 1.67 µs @ 100 MHz
 
-#define DSHOT_HIGH (DSHOT_BIT_TICKS * 3 / 4) // high duration for bit '1' = 75% of 27 = 20 ticks
-#define DSHOT_LOW  (DSHOT_BIT_TICKS * 3 / 8) // high duration for bit '0' = 37.5% of 27 = 10 ticks
+
+
+extern UART_HandleTypeDef huart1;
 
 /* USER CODE END Includes */
 
@@ -65,8 +66,14 @@
 TIM_HandleTypeDef htim2;
 DMA_HandleTypeDef hdma_tim2_ch3_up;
 
+UART_HandleTypeDef huart1;
+
 /* USER CODE BEGIN PV */
-uint16_t dshot_dma_buffer[DSHOT_BUFFER_SIZE];
+uint16_t dshot_dma_buffer_a[DSHOT_BUFFER_SIZE];
+uint16_t dshot_dma_buffer_b[DSHOT_BUFFER_SIZE];
+
+volatile uint16_t* active_buffer;
+volatile uint8_t buffer_toggle = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -74,15 +81,17 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void send_dshot600(uint16_t value, uint8_t telemetry);
-void prepare_dshot_packet(uint16_t throttle, uint8_t telemetry);
+void send_dshot(uint16_t value, uint8_t telemetry);
+void prepare_dshot_packet(uint16_t throttle, uint8_t telemetry, uint16_t* buffer);
 void dshot_beep(uint16_t command);
+void ramp_dshot(uint16_t start, uint16_t stop, uint8_t telemetry);
 /* USER CODE END 0 */
 
 /**
@@ -93,6 +102,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -114,21 +124,52 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_TIM2_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  for (int i = 0; i < 6; i++) {
-      send_dshot600(0, 0);
-      HAL_Delay(1);
+
+
+  //HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
+  printf("\nDShot Bit Ticks: %d\r\n", DSHOT_BIT_TICKS);
+  printf("DShot High: %d\r\n", DSHOT_HIGH);
+  printf("DShot Low: %d\r\n", DSHOT_LOW);
+  HAL_Delay(2500);
+
+  //Send init beeps
+  for (int i = 0; i < 6; i++){
+	  send_dshot(1, 0);
+	  if (i%2) send_dshot(24, 0);
+	  else send_dshot(28,0);
+	  HAL_Delay(2000);
+	  printf("Beep!\r\n");
   }
-  HAL_Delay(500);
+
+  printf("Initialization Complete.\r\n------------------------------\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  //HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-	  send_dshot600(5, 0);
-	  HAL_Delay(500);
+	  /*
+	  printf("Arming...\r\n");
+	  for (int i = 0; i < 5000; i++){
+		  send_dshot(0,1);
+		  HAL_Delay(1);
+	  }
+	  printf("Sending throttle pulses.\r\n");
+	  for (int i = 0; i < 5000; i++){
+		  send_dshot(1050, 1);
+		  HAL_Delay(1);
+	  }
+
+	  printf("Resetting...\r\n");
+	  HAL_Delay(2000);
+	  */
+	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+	  HAL_Delay(1);
+	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+	  HAL_Delay(1);
+
 
   }
     /* USER CODE END WHILE */
@@ -234,6 +275,39 @@ static void MX_TIM2_Init(void)
 }
 
 /**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 9600;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -264,6 +338,7 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
@@ -288,42 +363,44 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-void prepare_dshot_packet(uint16_t throttle, uint8_t telemetry)
+void prepare_dshot_packet(uint16_t value, uint8_t telemetry, uint16_t* buffer)
 {
-    // 1. Build 16-bit DShot packet
-    throttle <<= 1;
-    throttle |= telemetry;
-
+    // Build packet
+    value <<= 1;
+    value |= telemetry;
     uint16_t csum = 0;
     for (int i = 0; i < 3; i++)
-        csum ^= (throttle >> (i * 4)) & 0xF;
+        csum ^= (value >> (i * 4)) & 0xF;
+    uint16_t packet = (value << 4) | (csum & 0xF);
 
-    uint16_t packet = (throttle << 4) | (csum & 0xF);
-
-    // 2. Encode bits as PWM duty values
-    for (int i = 0; i < DSHOT_FRAME_SIZE; i++) {
-        if (packet & (1 << (15 - i)))
-            dshot_dma_buffer[i] = DSHOT_HIGH;
-        else
-            dshot_dma_buffer[i] = DSHOT_LOW;
+    // Fill DMA buffer
+    for (int i = 0; i < 16; i++) {
+        buffer[i] = (packet & (1 << (15 - i))) ? DSHOT_HIGH : DSHOT_LOW;
     }
-
-    // 3. Add two trailing zeros (idle/reset)
-    dshot_dma_buffer[DSHOT_FRAME_SIZE] = 0;
-    dshot_dma_buffer[DSHOT_FRAME_SIZE + 1] = 0;
+    buffer[16] = 0;
+    buffer[17] = 0;
 }
 
-void send_dshot600(uint16_t value, uint8_t telemetry)
+void send_dshot(uint16_t value, uint8_t telemetry)
 {
-    prepare_dshot_packet(value, telemetry);
-    //HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_3);  // Stop previous DMA transfer -- Already calling inside PulseFinishedCallback()
-    //HAL_StatusTypeDef result =
-    HAL_TIM_PWM_Start_DMA(
-        &htim2,
-        TIM_CHANNEL_3,
-        (uint32_t *)dshot_dma_buffer,
-        DSHOT_BUFFER_SIZE
-    );
+    uint16_t* buffer_to_use = buffer_toggle ? dshot_dma_buffer_b : dshot_dma_buffer_a;
+    prepare_dshot_packet(value, telemetry, buffer_to_use);
+
+    HAL_TIM_PWM_Start_DMA(&htim2, TIM_CHANNEL_3, (uint32_t*)buffer_to_use, DSHOT_BUFFER_SIZE);
+}
+
+void ramp_dshot(uint16_t start, uint16_t stop, uint8_t telemetry){
+	// Clamp to valid DShot throttle range
+	if (start < 48) start = 48;
+	if (stop > 2047) stop = 2047;
+
+	 if (start <= stop) {
+	        for (int i = start; i <= stop; i++) {
+	            send_dshot(i, telemetry);
+	            HAL_Delay(1);
+	        }
+	    }
+	 else return;
 }
 
 void TIM2_IRQHandler(void)
@@ -333,11 +410,16 @@ void TIM2_IRQHandler(void)
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
-    if (htim->Instance == TIM2)
-    {
+    if (htim->Instance == TIM2) {
         HAL_TIM_PWM_Stop_DMA(htim, TIM_CHANNEL_3);
-        HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+        buffer_toggle ^= 1;  // Flip to other buffer
     }
+}
+
+int _write(int file, char *ptr, int len)
+{
+    HAL_UART_Transmit(&huart1, (uint8_t *)ptr, len, HAL_MAX_DELAY);
+    return len;
 }
 /* USER CODE END 4 */
 
