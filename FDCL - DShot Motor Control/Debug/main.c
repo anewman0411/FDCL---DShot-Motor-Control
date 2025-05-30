@@ -38,17 +38,15 @@
 
 #define DSHOT_BIT_TICKS ((uint16_t)(DSHOT_MODE_US * (DSHOT_TIMER_FREQ / 1e6)))
 
-/* ----- HIGH AND LOW DEFINITIONS FOR LOW CH POLARITY ----- */
-#define DSHOT_HIGH ((DSHOT_BIT_TICKS * 38 + 50) / 100)  // 1 = short active
-#define DSHOT_LOW ((DSHOT_BIT_TICKS * 75 + 50) / 100)  // 0 = long active
-
-
-/* ----- HIGH AND LOW DEFINITIONS FOR HIGH CH POLARITY -----
-#define DSHOT_HIGH ((DSHOT_BIT_TICKS * 75 + 50) / 100)  // +50 for rounding
-#define DSHOT_LOW  ((DSHOT_BIT_TICKS * 38 + 50) / 100)   // +50 for rounding
+/* ----- HIGH AND LOW DEFINITIONS FOR LOW CH POLARITY -----
+#define DSHOT_HIGH ((DSHOT_BIT_TICKS * 38) / 100)  // 1 = short active
+#define DSHOT_LOW ((DSHOT_BIT_TICKS * 75) / 100)  // 0 = long active
 */
 
-#define SUSTAINED_DSHOT_DELAY_US 1000
+/* ----- HIGH AND LOW DEFINITIONS FOR HIGH CH POLARITY ----- */
+#define DSHOT_HIGH ((DSHOT_BIT_TICKS * 75) / 100)  // Logic '1'
+#define DSHOT_LOW  ((DSHOT_BIT_TICKS * 38) / 100)  // Logic '0'
+
 
 
 extern UART_HandleTypeDef huart1;
@@ -80,6 +78,7 @@ UART_HandleTypeDef huart1;
 uint16_t dshot_dma_buffer_a[DSHOT_BUFFER_SIZE];
 uint16_t dshot_dma_buffer_b[DSHOT_BUFFER_SIZE];
 
+volatile uint16_t* active_buffer;
 volatile uint8_t buffer_toggle = 0;
 volatile uint8_t dma_busy = 0;
 /* USER CODE END PV */
@@ -100,15 +99,16 @@ void send_dshot(uint16_t value, uint8_t telemetry);
 void prepare_dshot_packet(uint16_t throttle, uint8_t telemetry, uint16_t* buffer);
 void dshot_beep(uint16_t command);
 void ramp_dshot(uint16_t start, uint16_t stop, uint8_t telemetry);
-void sustained_dshot300(uint16_t value, uint8_t telemetry, uint16_t duration_ms);
 void Delay_us(uint32_t us);
-void My_DMA_XferCpltCallback(DMA_HandleTypeDef *hdma);
 /* USER CODE END 0 */
 
 /**
   * @brief  The application entry point.
   * @retval int
   */
+/*
+ *
+ */
 int main(void)
 {
 
@@ -117,12 +117,11 @@ int main(void)
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
-
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-  DWT_Init();
+  //DWT_Init();
   SystemClock_Config();
   SystemCoreClockUpdate();
   /* USER CODE END Init */
@@ -139,43 +138,39 @@ int main(void)
   MX_USART1_UART_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
-  //hdma_tim3_ch4_up.XferCpltCallback = My_DMA_XferCpltCallback;
-  //HAL_TIM_Base_Start(&htim3);          // Start the timer
-  //HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4); // Start PWM on Channel 4
-
-  uint32_t realHCLK = HAL_RCC_GetHCLKFreq();
-  uint32_t realSys = HAL_RCC_GetSysClockFreq();
-
   printf("\nDShot Bit Ticks: %d\r\n", DSHOT_BIT_TICKS);
   printf("DShot High: %d\r\n", DSHOT_HIGH);
   printf("DShot Low: %d\r\n", DSHOT_LOW);
   printf("DShot Buffer Size: %d\r\n", DSHOT_BUFFER_SIZE);
-  printf("Real HCLK: %lu Hz\r\n", realHCLK);
-  printf("Real SYSCLK: %lu Hz\r\n", realSys);
+  printf("SystemCoreClock = %lu Hz\r\n", SystemCoreClock);
+  printf("HAL_RCC_GetHCLKFreq() = %lu Hz\r\n", HAL_RCC_GetHCLKFreq());
   //HAL_Delay(2500);
 
-  for (int i = 0; i < 4; i++){
-	  send_dshot(5,0);
-	  HAL_Delay(1000);
-	  printf("BEEP!\r\n");
-  }
-
   //If using 25 us delay ----> 20 000 iterations needed for one second
-  printf("ARMING.\r\n");
-  sustained_dshot300(0, 0, 3000);
-  send_dshot(48, 0);  // Minimum valid throttle value
+  printf("Arming...\r\n");
+  for (int i = 0; i < 2200; i++){
+	  send_dshot(0,0);
+	  HAL_Delay(1);
+	}
   HAL_Delay(100);
-  printf("------------------------------------ Initialization Complete ------------------------------------\r\n");
+
+  printf("Initialization Complete.\r\n------------------------------\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  send_dshot(100, 0);
-	  Delay_us(1000);
-	  printf("Sending DShot Throttle: %d\r\n", 1500);
-
+	  /*
+	  printf("Sending throttle pulses.\r\n");
+	  for (int i = 0; i < 120000; i++){
+		  send_dshot(1500, 0);
+		  Delay_us(230);
+	  }
+	  */
+	  HAL_Delay(1000);
+	  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+	  send_dshot(5,0);
 
   }
     /* USER CODE END WHILE */
@@ -183,6 +178,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
 
   /* USER CODE END 3 */
+
 }
 
 /**
@@ -243,7 +239,6 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 0 */
 
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
 
@@ -256,15 +251,6 @@ static void MX_TIM3_Init(void)
   htim3.Init.Period = 332;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
   if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
@@ -284,7 +270,7 @@ static void MX_TIM3_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM3_Init 2 */
-  __HAL_TIM_ENABLE_DMA(&htim3, TIM_DMA_CC4);  // Enable update DMA requests
+
   /* USER CODE END TIM3_Init 2 */
   HAL_TIM_MspPostInit(&htim3);
 
@@ -384,55 +370,33 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-void prepare_dshot_packet(uint16_t throttle, uint8_t telemetry, uint16_t* buffer)
+void prepare_dshot_packet(uint16_t value, uint8_t telemetry, uint16_t* buffer)
 {
-	/*Since TIM3 is a 16-bit timer, only the lower 16 bits of each 32-bit CCR value are used,
-	 *but using uint32_t ensures compatibility with the DMA configuration.*/
-	uint16_t packet = (throttle << 1) | telemetry;
-	    uint16_t csum = 0;
-	    for (int i = 0; i < 3; i++) {
-	        csum ^= (packet >> (i * 4)) & 0xF;
-	    }
-	    packet = (packet << 4) | (csum & 0xF);
+    // Build packet
+    value <<= 1;
+    value |= telemetry;
+    uint16_t csum = 0;
+    for (int i = 0; i < 3; i++)
+        csum ^= (value >> (i * 4)) & 0xF;
+    uint16_t packet = (value << 4) | (csum & 0xF);
 
-	    for (int i = 0; i < 16; i++) {
-	        buffer[i] = (packet & (1 << (15 - i))) ? DSHOT_HIGH : DSHOT_LOW;
-	    }
-	    buffer[16] = 0;
-	    buffer[17] = 0;
+    // Fill DMA buffer
+    for (int i = 0; i < 16; i++) {
+        buffer[i] = (packet & (1 << (15 - i))) ? DSHOT_HIGH : DSHOT_LOW;
+    }
+    buffer[16] = 0;
+    buffer[17] = 0;
 }
 
-void send_dshot(uint16_t value, uint8_t telemetry) {
-	  while(dma_busy); // Wait for previous transfer
+void send_dshot(uint16_t value, uint8_t telemetry)
+{
+	while (dma_busy);
+	dma_busy = 1;
 
-	  uint16_t* buffer_to_use = buffer_toggle ? dshot_dma_buffer_b : dshot_dma_buffer_a;
-	  prepare_dshot_packet(value, telemetry, buffer_to_use);
+    uint16_t* buffer_to_use = buffer_toggle ? dshot_dma_buffer_b : dshot_dma_buffer_a;
+    prepare_dshot_packet(value, telemetry, buffer_to_use);
 
-	  // Manually configure and start DMA
-	  HAL_TIM_PWM_Start_DMA(
-	      &htim3,                  // Pass timer handle, not DMA handle
-	      TIM_CHANNEL_4,           // Channel number
-	      (uint32_t*)buffer_to_use,  // Data buffer
-	      DSHOT_BUFFER_SIZE        // Buffer length
-	  );
-
-	  // Configure DMA trigger to update event
-	  TIM3->DIER = TIM_DIER_UDE;  // Enable update DMA request
-	  TIM3->CR1 |= TIM_CR1_CEN;   // Start timer
-
-	  dma_busy = 1;
-}
-
-void sustained_dshot300(uint16_t value, uint8_t telemetry, uint16_t duration_ms){
-	printf("Sending Sustained DShot300 Pulse for %d Milliseconds.\r\n", duration_ms);
-	//Convert ms to iterations: (1 ms) (1 us / .001 ms) (1 iteration / 50 us)
-
-	float iterations_f = (float)duration_ms * 1000.0f / SUSTAINED_DSHOT_DELAY_US;  // 1 ms = 1000 us, 1 iteration every 50 us
-	int iterations = (int)iterations_f;
-	for (int i = 0; i < iterations; i++){
-		send_dshot(value, telemetry);
-		Delay_us(SUSTAINED_DSHOT_DELAY_US);
-	}
+    HAL_TIM_PWM_Start_DMA(&htim3, TIM_CHANNEL_4, (uint32_t*)buffer_to_use, DSHOT_BUFFER_SIZE);
 }
 
 void ramp_dshot(uint16_t start, uint16_t stop, uint8_t telemetry){
@@ -449,40 +413,28 @@ void ramp_dshot(uint16_t start, uint16_t stop, uint8_t telemetry){
 	 else return;
 }
 
-void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim) {
-    if(htim->Instance == TIM3) {
-        //printf("Callback: Stopping DMA\r\n");
-        HAL_TIM_PWM_Stop_DMA(htim, TIM_CHANNEL_4);
-        //printf("Callback: DMA Stopped, State=%d\r\n", htim->State);
-        dma_busy = 0;
-    }
-}
-/*
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM3) {
-        buffer_toggle ^= 1;  // Flip to the other buffer
-        dma_busy = 0;        // Clear the busy flag
-        printf("PeriodElapsedCallback\r\n"); // Uncomment for debugging
+        HAL_TIM_PWM_Stop_DMA(htim, TIM_CHANNEL_4);
+        buffer_toggle ^= 1;  // Flip to other buffer
+        dma_busy = 0;        // Clear busy flag
+        //printf("PulseFinishedCallback\r\n");
     }
-}
-*/
-
-void My_DMA_XferCpltCallback(DMA_HandleTypeDef *hdma)
-{
-	  if(hdma == &hdma_tim3_ch4_up) {
-	    TIM3->CR1 &= ~TIM_CR1_CEN;  // Stop timer
-	    TIM3->DIER &= ~TIM_DIER_UDE; // Disable DMA request
-	    dma_busy = 0;
-	    buffer_toggle ^= 1;
-	  }
 }
 
 void Delay_us(uint32_t us)
 {
-	uint32_t start = DWT->CYCCNT;
-	uint32_t ticks = us * (HAL_RCC_GetHCLKFreq() / 1000000);
-	while ((DWT->CYCCNT - start) < ticks);
+	/*
+    uint32_t start = DWT->CYCCNT;
+    uint32_t ticks = us * (HAL_RCC_GetHCLKFreq() / 1000000);
+    while ((DWT->CYCCNT - start) < ticks);
+    */
+
+    uint32_t start = HAL_GetTick();  // 1ms precision, temp fix
+    while ((HAL_GetTick() - start) < (us / 1000)) {
+        // do nothing
+    }
 
 }
 
