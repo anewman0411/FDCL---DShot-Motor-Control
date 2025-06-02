@@ -1,0 +1,12 @@
+../Core/Src/main.c:94:5:main	1
+../Core/Src/main.c:182:6:SystemClock_Config	3
+../Core/Src/main.c:229:13:MX_TIM5_Init	5
+../Core/Src/main.c:292:13:MX_DMA_Init	1
+../Core/Src/main.c:310:13:MX_GPIO_Init	1
+../Core/Src/main.c:326:6:DShot_PrepareBuffer	3
+../Core/Src/main.c:352:9:dshot_crc	1
+../Core/Src/main.c:358:10:make_dshot_frame	1
+../Core/Src/main.c:374:6:StartDefaultTask	1
+../Core/Src/main.c:392:6:DShotTask	4
+../Core/Src/main.c:444:6:HAL_TIM_PeriodElapsedCallback	2
+../Core/Src/main.c:462:6:Error_Handler	1
