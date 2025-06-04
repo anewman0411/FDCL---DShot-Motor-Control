@@ -357,12 +357,22 @@ static void MX_GPIO_Init(void)
  * @param throttle: Throttle value (0-2047)
  * @param telemetry: Telemetry request flag (0 or 1)
  */
+/**
+ * @brief Prepares the DShot packet and fills the DMA buffer.
+ * @param throttle: Throttle value (0-2047)
+ * @param telemetry: Telemetry request flag (0 or 1)
+ */
 static void prepare_dshot_packet(uint16_t throttle, uint8_t telemetry) {
     // 1. Construct 12-bit payload: [11-bit throttle][1-bit telemetry]
     uint16_t payload = ((throttle & 0x07FF) << 1) | (telemetry & 0x01);
 
     // 2. Compute 4-bit checksum
-    uint16_t csum = payload ^ (payload >> 4) ^ (payload >> 8);
+    uint16_t csum_data = payload;
+    uint16_t csum = 0;
+    for (int i = 0; i < 3; i++) {
+        csum ^= csum_data;          // xor data
+        csum_data >>= 4;            // shift to next nibble
+    }
     uint8_t checksum = csum & 0x0F;
 
     // 3. Combine payload and checksum into 16-bit packet
@@ -370,10 +380,14 @@ static void prepare_dshot_packet(uint16_t throttle, uint8_t telemetry) {
 
     // 4. Translate packet bits into PWM duty cycles
     for (int i = 0; i < DSHOT_FRAME_SIZE; i++) {
-        dshot_buffer[i] = (packet & (1 << (15 - i))) ? DSHOT_HIGH : DSHOT_LOW;
+        if (packet & (1 << (15 - i))) {
+            dshot_buffer[i] = DSHOT_HIGH;  // High-time for '1' bit
+        } else {
+            dshot_buffer[i] = DSHOT_LOW;   // Low-time for '0' bit
+        }
     }
 
-    // 5. Append zero to ensure line idles low after transmission
+    // 5. Append two trailing zeros to ensure line idles low after transmission
     dshot_buffer[16] = 0;
     dshot_buffer[17] = 0;
 }
@@ -397,7 +411,7 @@ void send_dshot(uint16_t throttle, uint8_t telemetry) {
     }
 }
 
-void sustained_dshot300(uint16_t value, uint8_t telemetry, uint16_t duration_ms){
+void sustained_bdshot(uint16_t value, uint8_t telemetry, uint16_t duration_ms){
 	printf("Sending Sustained DShot300 Pulse for %d Milliseconds.\r\n", duration_ms);
 	//Convert ms to iterations: (1 ms) (1 us / .001 ms) (1 iteration / 50 us)
 
