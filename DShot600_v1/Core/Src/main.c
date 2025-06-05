@@ -37,9 +37,9 @@
 /* USER CODE BEGIN PD */
 #define DSHOT_FRAME_RATE_US 130  // 130 µs frame rate
 #define DSHOT_BIT_PERIOD_TICKS 140  // 1.67 µs at 84 MHz (TIM5 clock)
-#define DSHOT_T1L_TICKS 105  // For logic 1: LOW for 1.25 µs (inverted)
+#define DSHOT_BUFFER_SIZE 34  // 1 for dummy right-shift + 16 bits * 2 + 1 final LOW + 1 for telemetry delay
+#define DSHOT_T1L_TICKS 105 // For logic 1: LOW for 1.25 µs (inverted)
 #define DSHOT_T0L_TICKS 52   // For logic 0: LOW for 0.625 µs (inverted)
-#define DSHOT_BUFFER_SIZE 156  // 16 bits * 2 + 1 final LOW + 1 for telemetry delay
 #define DSHOT_TELEMETRY_DELAY_TICKS 8676  // 103.28 µs (130 µs - 26.72 µs) at 84 MHz
 
 #define THROTTLE_MINIMUM 70
@@ -54,8 +54,9 @@
 TIM_HandleTypeDef htim5;
 DMA_HandleTypeDef hdma_tim5_ch1;
 
+UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart6;
-DMA_HandleTypeDef hdma_usart6_rx;
+DMA_HandleTypeDef hdma_usart1_rx;
 
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -95,6 +96,7 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_TIM5_Init(void);
 static void MX_USART6_UART_Init(void);
+static void MX_USART1_UART_Init(void);
 void StartDefaultTask(void *argument);
 void DShotTask(void *argument);
 void StartSerialTask(void *argument);
@@ -106,7 +108,9 @@ uint16_t make_bdshot_frame(uint16_t value, bool telemetry);
 void queue_bdshot_pulse(uint16_t throttle, bool telemetry);
 void send_bdshot(uint32_t channel);
 uint32_t decode_eRPM(uint16_t telemetry_frame);
-uint32_t us_to_ticks(uint32_t us);
+void vTaskDelay( const TickType_t xTicksToDelay );
+
+//uint32_t us_to_ticks(uint32_t us); Problematic because in FreeRTOS with a 1 Khz cycle, 1 tick is 1 ms
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -147,6 +151,7 @@ int main(void)
   MX_DMA_Init();
   MX_TIM5_Init();
   MX_USART6_UART_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
   /* Create the thread(s) */
@@ -274,7 +279,7 @@ static void MX_TIM5_Init(void)
   htim5.Instance = TIM5;
   htim5.Init.Prescaler = 0;
   htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim5.Init.Period = 62;
+  htim5.Init.Period = 70;
   htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim5) != HAL_OK)
@@ -296,25 +301,40 @@ static void MX_TIM5_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM5_Init 2 */
-  /*
-  // Configure DMA for TIM5_CH1 (PA0)
-  hdma_tim5_ch1.Instance = DMA1_Stream2;
-  hdma_tim5_ch1.Init.Channel = DMA_CHANNEL_6;
-  hdma_tim5_ch1.Init.Direction = DMA_MEMORY_TO_PERIPH;
-  hdma_tim5_ch1.Init.PeriphInc = DMA_PINC_DISABLE;
-  hdma_tim5_ch1.Init.MemInc = DMA_MINC_ENABLE;
-  hdma_tim5_ch1.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;
-  hdma_tim5_ch1.Init.MemDataAlignment = DMA_MDATAALIGN_WORD;
-  hdma_tim5_ch1.Init.Mode = DMA_CIRCULAR;
-  hdma_tim5_ch1.Init.Priority = DMA_PRIORITY_HIGH;
-  hdma_tim5_ch1.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
-  if (HAL_DMA_Init(&hdma_tim5_ch1) != HAL_OK)
+  /* USER CODE END TIM5_Init 2 */
+  HAL_TIM_MspPostInit(&htim5);
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 1000000;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
   {
     Error_Handler();
   }
-	*/
-  /* USER CODE END TIM5_Init 2 */
-  HAL_TIM_MspPostInit(&htim5);
+  /* USER CODE BEGIN USART1_Init 2 */
+  /* USER CODE END USART1_Init 2 */
 
 }
 
@@ -338,7 +358,7 @@ static void MX_USART6_UART_Init(void)
   huart6.Init.WordLength = UART_WORDLENGTH_8B;
   huart6.Init.StopBits = UART_STOPBITS_1;
   huart6.Init.Parity = UART_PARITY_NONE;
-  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.Mode = UART_MODE_TX;
   huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart6.Init.OverSampling = UART_OVERSAMPLING_16;
   if (HAL_UART_Init(&huart6) != HAL_OK)
@@ -365,9 +385,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Stream2_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
-  /* DMA2_Stream1_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
+  /* DMA2_Stream2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
 
 }
 
@@ -386,6 +406,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -403,21 +424,27 @@ static void MX_GPIO_Init(void)
 void prepare_bdshot_buffer(uint16_t frame)
 {
     uint32_t buffer_index = 0;
+
+    // 1️⃣ Insert a dummy 0 at the start to absorb the DMA skip
+    //dshot_buffer[buffer_index++] = 0;  // Dummy preload entry
+
+    // 2️⃣ Build the actual DSHOT waveform entries
     for (int i = 15; i >= 0; i--)
     {
         uint8_t bit = (frame >> i) & 0x01;
         if (bit)
         {
-            dshot_buffer[buffer_index++] = DSHOT_T1L_TICKS;  // 1.25 µs (logic 1 inverted)
+            dshot_buffer[buffer_index++] = DSHOT_T1L_TICKS;  // logic 1
             dshot_buffer[buffer_index++] = 0;
         }
         else
         {
-            dshot_buffer[buffer_index++] = DSHOT_T0L_TICKS;  // 0.625 µs (logic 0 inverted)
+            dshot_buffer[buffer_index++] = DSHOT_T0L_TICKS;  // logic 0
             dshot_buffer[buffer_index++] = 0;
         }
     }
 
+    // 3️⃣ Final low pulses (as before)
     dshot_buffer[buffer_index++] = 0;  // Final LOW
     dshot_buffer[buffer_index++] = 0;  // Extra delay
 }
@@ -430,11 +457,14 @@ uint16_t bdshot_crc(uint16_t value) {
 }
 
 // Create 16-bit DSHOT frame with correct CRC
-uint16_t make_bdshot_frame(uint16_t value, bool telemetry)
-{
-    value = (value << 1) | (telemetry ? 1 : 0);  // Add telemetry bit
-    uint8_t crc = bdshot_crc(value);
-    return (value << 4) | crc;
+uint16_t make_bdshot_frame(uint16_t value, bool telemetry) {
+    if (value == 0) {
+        return 0x000F; // hardware expects this special frame
+    }
+    value &= 0x07FF; // 11 bits
+    uint16_t frame_no_crc = (value << 1) | (telemetry ? 1 : 0);
+    uint8_t crc = bdshot_crc(frame_no_crc);
+    return (frame_no_crc << 4) | crc;
 }
 
 void queue_bdshot_pulse(uint16_t throttle, bool telemetry){
@@ -443,10 +473,12 @@ void queue_bdshot_pulse(uint16_t throttle, bool telemetry){
 }
 
 void send_bdshot(uint32_t channel){
-    if (HAL_TIM_PWM_Start_DMA(&htim5, channel, dshot_buffer, DSHOT_BUFFER_SIZE) != HAL_OK)
+    if (HAL_TIM_PWM_Start_DMA(&htim5, channel, (uint32_t*)dshot_buffer, DSHOT_BUFFER_SIZE) != HAL_OK)
     {
         Error_Handler();
+        printf("Error in send_bdshot()\r\n");
     }
+    //printf("%d\r\n",dshot_buffer);
     dshot_running = 1;
 }
 
@@ -488,10 +520,12 @@ uint32_t decode_eRPM(uint16_t telemetry_frame)
     return erpm;
 }
 
+/*
 uint32_t us_to_ticks(uint32_t us){
 	uint32_t ticks = us * 168;
 	return ticks;
 }
+*/
 
 int _write(int file, char *ptr, int len)
 {
@@ -510,20 +544,20 @@ int _write(int file, char *ptr, int len)
     return len;
 }
 
-/*
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
 	// After sending DSHOT frame via PWM
 	//HAL_TIM_PWM_Stop_DMA(&htim5, TIM_CHANNEL_1);
 
+    //HAL_UART_Receive_DMA(&huart6, telemetry_buffer, 2);
+
     // Optionally set a flag
     dshot_running = 0;
 }
-*/
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == USART6)
+    if (huart->Instance == USART1)
     {
     	printf("UART CALLBACK\r\n");
 
@@ -538,7 +572,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         }
 
         // Re-arm DMA reception for the next telemetry frame
-        HAL_UART_Receive_DMA(&huart6, telemetry_buffer, sizeof(telemetry_buffer));
+        HAL_UART_Receive_DMA(&huart1, telemetry_buffer, 2);
     }
 }
 
@@ -576,15 +610,26 @@ void DShotTask(void *argument)
 
     // Step 1: Send ARM command (value 0)
 	printf("Arming.\r\n");
+	//uint16_t frame_hc = 0x000F;
+	//uint16_t frame_g = make_bdshot_frame(0, true);
+	//printf("Generated frame: 0x%04X\r\n", frame_g);
+	//printf("Hard-coded frame: 0x%04X\r\n", frame_hc);
+	//prepare_bdshot_buffer(frame_hc);
 	queue_bdshot_pulse(0, true);
-	send_bdshot(TIM_CHANNEL_1);
-
-    osDelay(3000);  // Wait 300ms (Bluejay requires for arming)
+	for (int i = 0; i < 5000; i++){
+		send_bdshot(TIM_CHANNEL_1);
+		vTaskDelay(1);
+	}
+	printf("Done arming!\r\n");
+    vTaskDelay(300);  // Wait 300ms (Bluejay requires for arming)
 
     //Approximately 84 ticks in 1 microsecond (Timer Clock = 84 MHz)
     printf("Throttling.\r\n");
-    queue_bdshot_pulse(100, true);
-    send_bdshot(TIM_CHANNEL_1);
+    queue_bdshot_pulse(200, true);
+    for (;;){
+      send_bdshot(TIM_CHANNEL_1);
+      vTaskDelay(1);
+    }
     while (1)
     {
 
@@ -605,7 +650,7 @@ void StartSerialTask(void *argument)
   char msg[SERIAL_QUEUE_ITEM_SIZE];
 
   // Start DMA reception
-  HAL_UART_Receive_DMA(&huart6, telemetry_buffer, sizeof(telemetry_buffer));
+  HAL_UART_Receive_DMA(&huart1, telemetry_buffer, sizeof(telemetry_buffer));
 
   for(;;)
   {
