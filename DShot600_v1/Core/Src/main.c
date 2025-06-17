@@ -25,6 +25,9 @@
 #include "stdbool.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
+#include <assert.h>
+
 
 /* USER CODE END Includes */
 
@@ -43,6 +46,18 @@
 #define DSHOT_TELEMETRY_DELAY_TICKS 8676  // 103.28 µs (130 µs - 26.72 µs) at 84 MHz
 
 #define THROTTLE_MINIMUM 70
+
+// Adjust these as needed!
+#define TELEMETRY_PIN        GPIO_PIN_0
+#define TELEMETRY_GPIO_PORT  GPIOA
+
+// 21 bits: 1 start (always 0), 20 data bits
+#define TELEMETRY_BITS 21
+
+// This timing must match the ESC's telemetry bit width.
+// For BDshot, Bluejay's default is ~2.14 us per bit (for 8kHz DShot).
+#define TELEMETRY_BIT_US 1   // Adjust if needed
+#define TELEMETRY_TIMEOUT_US 50 // Max wait before abort (for loss of signal)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -54,9 +69,7 @@
 TIM_HandleTypeDef htim5;
 DMA_HandleTypeDef hdma_tim5_ch1;
 
-UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart6;
-DMA_HandleTypeDef hdma_usart1_rx;
 
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -83,7 +96,6 @@ const osThreadAttr_t SerialTask_attributes = {
 uint32_t dshot_buffer[DSHOT_BUFFER_SIZE];  // DMA buffer for DSHOT signal
 volatile uint8_t dshot_running = 0;  // Flag to indicate if DSHOT signal is active
 uint8_t telemetry_buffer[2]; // Make sure it's global!
-static uint32_t frame_counter = 0;
 
 #define SERIAL_QUEUE_LENGTH 10
 #define SERIAL_QUEUE_ITEM_SIZE 128
@@ -97,19 +109,19 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_TIM5_Init(void);
 static void MX_USART6_UART_Init(void);
-static void MX_USART1_UART_Init(void);
 void StartDefaultTask(void *argument);
 void DShotTask(void *argument);
 void StartSerialTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-
 void prepare_bdshot_buffer(uint16_t frame);
 uint16_t make_bdshot_frame(uint16_t value, bool telemetry);
 void queue_bdshot_pulse(uint16_t throttle, bool telemetry);
 void send_bdshot(uint32_t channel);
 void vTaskDelay( const TickType_t xTicksToDelay );
-uint32_t decode_eRPM_from_EDT(uint16_t telemetry_frame);
+void delay_task_us(uint32_t us);
+void delay_us_busy(uint32_t us);
+void DWT_Init(void);
 
 //uint32_t us_to_ticks(uint32_t us); Problematic because in FreeRTOS with a 1 Khz cycle, 1 tick is 1 ms
 /* USER CODE END PFP */
@@ -137,14 +149,13 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  DWT_Init();
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -152,7 +163,6 @@ int main(void)
   MX_DMA_Init();
   MX_TIM5_Init();
   MX_USART6_UART_Init();
-  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
   /* Create the thread(s) */
@@ -308,38 +318,6 @@ static void MX_TIM5_Init(void)
 }
 
 /**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART1_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART1_Init 0 */
-
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 3000000;
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART1_Init 2 */
-  /* USER CODE END USART1_Init 2 */
-
-}
-
-/**
   * @brief USART6 Initialization Function
   * @param None
   * @retval None
@@ -359,7 +337,7 @@ static void MX_USART6_UART_Init(void)
   huart6.Init.WordLength = UART_WORDLENGTH_8B;
   huart6.Init.StopBits = UART_STOPBITS_1;
   huart6.Init.Parity = UART_PARITY_NONE;
-  huart6.Init.Mode = UART_MODE_TX;
+  huart6.Init.Mode = UART_MODE_TX_RX;
   huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart6.Init.OverSampling = UART_OVERSAMPLING_16;
   if (HAL_UART_Init(&huart6) != HAL_OK)
@@ -380,15 +358,11 @@ static void MX_DMA_Init(void)
 
   /* DMA controller clock enable */
   __HAL_RCC_DMA1_CLK_ENABLE();
-  __HAL_RCC_DMA2_CLK_ENABLE();
 
   /* DMA interrupt init */
   /* DMA1_Stream2_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
-  /* DMA2_Stream2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
 
 }
 
@@ -407,7 +381,6 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -422,6 +395,58 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+static inline uint8_t read_telemetry_pin(void) {
+    return HAL_GPIO_ReadPin(TELEMETRY_GPIO_PORT, TELEMETRY_PIN) ? 1 : 0;
+}
+
+int receive_bdshot_telemetry(uint32_t *telemetry_out) {
+    uint32_t value = 0;
+    uint32_t bitcount = 0;
+
+    // Wait for line to go low (start bit, up to timeout)
+    uint32_t timeout = 0;
+    while (read_telemetry_pin()) {
+        delay_us_busy(1);
+        if (++timeout > TELEMETRY_TIMEOUT_US) {
+            return -1; // Timeout waiting for start bit
+        }
+    }
+
+    // Sample first bit (start, must be 0), ignore storing
+    delay_us_busy(TELEMETRY_BIT_US); // Wait to middle of bit
+
+    // Now sample the next 20 bits (MSB first is standard)
+    for (bitcount = 0; bitcount < 20; bitcount++) {
+        value <<= 1;
+        value |= read_telemetry_pin();
+        delay_us_busy(TELEMETRY_BIT_US);
+    }
+
+    *telemetry_out = value;
+    return 0; // Success
+}
+
+void set_pin_input_PA0(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_0;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+void set_pin_pwm_PA0(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_0;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF2_TIM5; // Alternate function for TIM5 CH1 on PA0
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+
 void prepare_bdshot_buffer(uint16_t frame)
 {
     uint32_t buffer_index = 0;
@@ -450,11 +475,17 @@ void prepare_bdshot_buffer(uint16_t frame)
     dshot_buffer[buffer_index++] = 0;  // Extra delay
 }
 
-// Generate CRC (same as spec)
-uint16_t bdshot_crc(uint16_t value) {
-    uint16_t crc = value ^ (value >> 4) ^ (value >> 8);
-    crc = ~crc; // Invert bits
-    return crc & 0x0F; // Mask to 4 bits
+
+// value_12bit should be 0...4095
+uint8_t bdshot_crc(uint16_t value_12bit)
+{
+    // Optional: Uncomment to assert 12-bit range in debug
+    // assert(value_12bit < 4096);
+
+    uint16_t crc = value_12bit ^ (value_12bit >> 4) ^ (value_12bit >> 8);
+    crc = ~crc;           // Bitwise NOT
+    crc = crc & 0x0F;     // Mask to 4 bits
+    return (uint8_t)crc;
 }
 
 // Create 16-bit DSHOT frame with correct CRC
@@ -483,49 +514,21 @@ void send_bdshot(uint32_t channel){
     dshot_running = 1;
 }
 
-bool check_bdshot_crc(uint16_t telemetry_frame)
-{
-    // Extract data (12 bits)
-    uint16_t data = telemetry_frame >> 4;
-
-    // Extract received CRC (4 bits)
-    uint8_t received_crc = telemetry_frame & 0x0F;
-
-    // Calculate CRC
-    uint8_t crc = data ^ (data >> 4) ^ (data >> 8);
-    //crc = ~crc & 0x0F;
-
-    // Check if CRC matches
-    return (crc == received_crc);
+void delay_us_busy(uint32_t us) {
+    uint32_t cycles = (SystemCoreClock / 1000000L) * us;
+    uint32_t start = DWT->CYCCNT;
+    while ((DWT->CYCCNT - start) < cycles);
 }
 
-uint32_t decode_eRPM_from_EDT(uint16_t telemetry_frame)
-{
-	//printf("decoding...\r\n");
-    // Extract 12-bit data (eee mmmmmmmmm)
-    uint16_t data = telemetry_frame >> 4;
-
-    // Extract received CRC (4 bits)
-    uint8_t received_crc = telemetry_frame & 0x0F;
-
-    // Compute CRC as per EDT specification
-    uint8_t crc = (data ^ (data >> 4) ^ (data >> 8));
-    crc = ~crc & 0x0F;
-
-    // Validate CRC
-    if (crc != received_crc) {
-        return -1; // Invalid CRC
-        printf("Invalid CRC\r\n");
+void delay_task_us(uint32_t us) {
+    if (us >= 1000) {
+        osDelay(us / 1000);               // RTOS yield for ms
+        delay_us_busy(us % 1000);         // busy-wait remaining µs
+    } else {
+        delay_us_busy(us);                // busy-wait only for short delays
     }
-
-    // Extract exponent and mantissa
-    uint8_t exponent = (telemetry_frame >> 12) & 0x07;    // Bits 12–14
-    uint16_t mantissa = (telemetry_frame >> 4) & 0x1FF;   // Bits 4–12
-
-    // Compute final eRPM value
-    uint32_t erpm = ((uint32_t)mantissa) << exponent;
-    return erpm;
 }
+
 
 int _write(int file, char *ptr, int len)
 {
@@ -544,9 +547,17 @@ int _write(int file, char *ptr, int len)
     return len;
 }
 
+void DWT_Init(void) {
+    if (!(DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk)) {
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+        DWT->CYCCNT = 0;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    }
+}
+
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
-    //HAL_UART_Receive_DMA(&huart1, telemetry_buffer, 2);
+    //HAL_UART_Receive_DMA(&huart6, telemetry_buffer, 2);
 
     // Optionally set a flag
     dshot_running = 0;
@@ -590,32 +601,33 @@ void DShotTask(void *argument)
 {
   /* USER CODE BEGIN DShotTask */
 	printf("\nDShotTask Begin.\r\n");
-
+	printf("SystemCoreClock=%lu\r\n", SystemCoreClock);
 
 
     // Step 1: Send ARM command (value 0)
 	printf("Arming.\r\n");
 	queue_bdshot_pulse(0, false);
-	for (int i = 0; i < 5000; i++){
+	for (int i = 0; i > -1; i++){
 		send_bdshot(TIM_CHANNEL_1);
 		vTaskDelay(1);
 	}
-
 	printf("Done arming!\r\n");
     vTaskDelay(300);  // Wait 300ms (Bluejay requires for arming)
-
-    printf("Enabling eTelemetry.\r\n");
-	queue_bdshot_pulse(13, true);
-	for (int i = 0; i < 100; i++){
-		send_bdshot(TIM_CHANNEL_1);
-		vTaskDelay(1);
-	}
 
     //Approximately 84 ticks in 1 microsecond (Timer Clock = 84 MHz)
     printf("Throttling.\r\n");
     queue_bdshot_pulse(200, true);
-    for (int i = 0; i > -1; i++){
+    uint32_t telemetry;
+    for (;;){
       send_bdshot(TIM_CHANNEL_1);
+      delay_us_busy(30);
+      set_pin_input_PA0();
+      if (receive_bdshot_telemetry(&telemetry) == 0) {
+    	  printf("Telemetry: 0x%05lX\r\n", telemetry); // 5 hex digits (20 bits), upper-case
+      } else {
+          printf("error reading telemetry\r\n");
+      }
+      set_pin_pwm_PA0();
       vTaskDelay(1);
     }
     while (1)
@@ -636,8 +648,6 @@ void StartSerialTask(void *argument)
 {
   /* USER CODE BEGIN StartSerialTask */
   char msg[SERIAL_QUEUE_ITEM_SIZE];
-  uint8_t telemetry_byte;
-  int counter = 0;
 
   for (;;)
   {
@@ -645,22 +655,6 @@ void StartSerialTask(void *argument)
       if (osMessageQueueGet(serialQueueHandle, msg, NULL, 10) == osOK)
       {
           HAL_UART_Transmit(&huart6, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
-      }
-
-      // 2️⃣ Read **1 byte of telemetry** per DSHOT pulse
-      if (HAL_UART_Receive(&huart1, &telemetry_byte, 1, 10) == HAL_OK)
-      {
-    	  counter++;
-		  if (counter % 100 == 0){
-			  // ✅ If you want to log raw telemetry byte:
-			  snprintf(msg, sizeof(msg), "Telemetry Byte: 0x%02X\r\n", telemetry_byte);
-			  osMessageQueuePut(serialQueueHandle, msg, 0, 0);
-
-			  // ✅ If you have a known 8-bit telemetry meaning (e.g., direct RPM):
-			  // uint32_t rpm = telemetry_byte * scaling_factor;
-			  // snprintf(msg, sizeof(msg), "Telemetry RPM: %lu\r\n", rpm);
-			  // osMessageQueuePut(serialQueueHandle, msg, 0, 0);
-		  }
       }
 
       osDelay(1); // Let other tasks run
